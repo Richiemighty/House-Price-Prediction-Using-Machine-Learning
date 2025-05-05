@@ -1,0 +1,720 @@
+---
+title: "House Price Prediction Using Machine Learning"
+author: "Idris"
+output: html_document
+---
+
+```{r message=FALSE, warning=FALSE}
+# Loading necessary libraries
+library(tidyverse)  # Data manipulation and visualization
+library(caret)      # For machine learning
+library(randomForest)  # For random forest model
+library(xgboost)    # For XGBoost model
+library(e1071)      # For SVM model
+library(leaflet)    # For map visualization
+library(RColorBrewer)  # For color palettes
+library(viridis)    # For better color scales
+library(corrplot)   # For correlation matrix
+library(ggcorrplot) # For advanced correlation matrix visualization
+library(ggplot2)    # For advanced plotting
+```
+
+
+
+
+# Loading the dataset
+```{r warning=FALSE}
+housing_data <- read.csv("/Users/macbook/Downloads/Housing Data_Same Region_8f72e77ef59ca0d2b5284fe2a21dbca0.csv")
+head(housing_data)
+```
+
+
+####     GEOMAP
+```{r warning=FALSE}
+# Create popup content
+housing_data <- housing_data %>%
+  mutate(popup_info = paste0(
+    "<b>Parcel:</b> ", PARCELNO, "<br>",
+    "<b>Price ($):</b> ", SALE_PRC, "<br>",
+    "<b>Living Area (sqft):</b> ", TOT_LVG_AREA
+  ))
+
+# Create the leaflet map
+leaflet(housing_data) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~LONGITUDE,
+    lat = ~LATITUDE,
+    radius = 6,
+    color = "blue",
+    fillOpacity = 0.6,
+    popup = ~popup_info
+  )
+
+```
+
+```{r warning=FALSE}
+# Create color palette with viridis
+pal <- colorNumeric(palette = "viridis", domain = housing_data$SALE_PRC)
+
+leaflet(housing_data) %>%
+  addTiles() %>%
+  addCircleMarkers(
+    lng = ~LONGITUDE,
+    lat = ~LATITUDE,
+    radius = 8,              # slightly larger for better visibility
+    color = ~pal(SALE_PRC),  # vibrant color by price
+    stroke = TRUE,           # adds border
+    weight = 1,              # border thickness
+    fillOpacity = 0.9,       # more solid fill
+    popup = ~popup_info
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = pal,
+    values = ~SALE_PRC,
+    title = "Sale Price ($)",
+    opacity = 0.9
+  )
+
+```
+
+
+
+# Data Cleaning
+Dropping Latitude and Longitude, and then Relocating Sale Price to the last column, And finally extracting only distinct rows
+```{r warning=FALSE}
+# ==== Basic Cleaning ====
+housing_data <- housing_data %>%
+  select(-LATITUDE, -LONGITUDE, -PARCELNO) %>%
+  select(-SALE_PRC, everything(), SALE_PRC) %>%
+  distinct()
+```
+
+
+```{r warning=FALSE}
+
+# ==== Convert Types ====
+housing_data$structure_quality <- factor(housing_data$structure_quality, levels = c(1, 2, 3, 4, 5), ordered = TRUE)
+housing_data$month_sold <- factor(housing_data$month_sold, levels = 1:12, labels = month.abb)
+housing_data$avno60plus <- factor(housing_data$avno60plus, levels = c(0, 1), labels = c("No", "Yes"))
+housing_data$SALE_PRC <- as.numeric(housing_data$SALE_PRC)
+
+```
+
+
+```{r warning=FALSE}
+colnames(housing_data)
+```
+
+
+```{r warning=FALSE}
+head(housing_data)
+```
+
+
+
+# DESCRIPTIVE ANALYSIS
+```{r warning=FALSE}
+# Selecting the numeric variables
+numeric_vars <- housing_data %>% select(LND_SQFOOT, TOT_LVG_AREA, SPEC_FEAT_VAL, RAIL_DIST, OCEAN_DIST, WATER_DIST, CNTR_DIST, SUBCNTR_DI, HWY_DIST, age)
+
+# Defining a custom function to compute all the desired statistics
+desc_stats <- function(x) {
+  c(
+    Count = length(x),
+    Min = min(x, na.rm = TRUE),
+    Max = max(x, na.rm = TRUE),
+    Mean = mean(x, na.rm = TRUE),
+    Median = median(x, na.rm = TRUE),
+    Std = sd(x, na.rm = TRUE),
+    Skewness = skewness(x, na.rm = TRUE),
+    Kurtosis = kurtosis(x, na.rm = TRUE)
+  )
+}
+
+# Applying the function to each variable and create a summary table
+stats_table <- as.data.frame(t(apply(numeric_vars, 2, desc_stats)))
+
+# Viewing the table with row names as variables
+stats_table$Variable <- rownames(stats_table)
+stats_table <- stats_table %>%
+  select(Variable, Count, Min, Max, Mean, Median, Std, Skewness, Kurtosis)
+
+# Printing the result
+print(stats_table)
+```
+
+
+
+# EDA
+```{r warning=FALSE}
+# Creating histogram for LND_SQFOOT
+ggplot(housing_data, aes(x = LND_SQFOOT)) +
+  geom_histogram(binwidth = 900, fill = "blue", color = "black", alpha = 0.9) +
+  labs(title = "Histogram of Land Square Foot", x = "Land Square Foot", y = "Frequency") +
+  theme_minimal()
+
+# Create histogram for TOT_LVG_AREA
+ggplot(housing_data, aes(x = TOT_LVG_AREA)) +
+  geom_histogram(binwidth = 100, fill = "green", color = "black", alpha = 0.7) +
+  labs(title = "Histogram of Total Living Area", x = "Total Living Area (sqft)", y = "Frequency") +
+  theme_minimal()
+
+# Create histogram for SALE_PRC
+ggplot(housing_data, aes(x = SALE_PRC)) +
+  geom_histogram(binwidth = 50000, fill = "red", color = "black", alpha = 0.7) +
+  labs(title = "Histogram of Sale Price", x = "Sale Price", y = "Frequency") +
+  theme_minimal()
+
+
+# Create histogram for Age
+ggplot(housing_data, aes(x = age)) +
+  geom_histogram(bins = 20, fill = "blue", color = "black", alpha = 0.9) +
+  labs(title = "Histogram of Age", x = "Age", y = "Frequency") +
+  theme_minimal()
+```
+
+
+### Box Plots
+```{r warning=FALSE}
+# Boxplot for SALE_PRC (Sale Price)
+ggplot(housing_data, aes(x = "", y = SALE_PRC)) + 
+  geom_boxplot(outlier.colour = "red", outlier.size = 2) + 
+  labs(title = "Boxplot of SALE_PRC (Sale Price)", y = "Sale Price") +
+  theme_minimal()
+
+# Boxplot for TOT_LVG_AREA (Total Living Area)
+ggplot(housing_data, aes(x = "", y = TOT_LVG_AREA)) + 
+  geom_boxplot(outlier.colour = "red", outlier.size = 2) + 
+  labs(title = "Boxplot of TOT_LVG_AREA (Total Living Area)", y = "Total Living Area (sq ft)") +
+  theme_minimal()
+
+# Boxplot for LND_SQFOOT (Land Square Footage)
+ggplot(housing_data, aes(x = "", y = LND_SQFOOT)) + 
+  geom_boxplot(outlier.colour = "red", outlier.size = 2) + 
+  labs(title = "Boxplot of LND_SQFOOT (Land Square Footage)", y = "Land Square Footage (sq ft)") +
+  theme_minimal()
+
+```
+
+
+```{r warning=FALSE}
+# Histogram for each of the variables with individual y-axis scales
+housing_data %>%
+  select(LND_SQFOOT, TOT_LVG_AREA, SPEC_FEAT_VAL) %>%
+  gather(key = "variable", value = "value") %>%
+  ggplot(aes(x = value, fill = variable)) +
+  geom_histogram(binwidth = 10000, bins = 10, alpha = 0.6, position = "identity") +
+  facet_wrap(~variable, scales = "free_y") +  # Set scales to free for each variable's y-axis
+  labs(title = "Histogram for LND_SQFOOT, TOT_LVG_AREA, SPEC_FEAT_VAL", x = "Value", y = "Frequency") +
+  theme_minimal()
+```
+
+
+```{r warning=FALSE}
+# Boxplot for each of the variables with their respective y-axis on the same page
+housing_data %>%
+  select(LND_SQFOOT, TOT_LVG_AREA, SPEC_FEAT_VAL) %>%
+  gather(key = "variable", value = "value") %>%
+  ggplot(aes(x = 1, y = value)) +  # Fix x-axis as 1, so only one boxplot per plot
+  geom_boxplot(fill = "lightblue", color = "black") +
+  facet_wrap(~variable, scales = "free_y") +  # Independent y-axes for each variable
+  labs(title = "Boxplot for LND_SQFOOT, TOT_LVG_AREA and SPEC_FEAT_VAL", x = "Variables", y = "Value") +
+  theme_minimal() +
+  theme(axis.title.x = element_blank(), axis.text.x = element_blank())  # Remove x-axis labels
+```
+
+```{r warning=FALSE}
+# Density plot for each of the variables
+housing_data %>%
+  select(LND_SQFOOT, TOT_LVG_AREA, SPEC_FEAT_VAL) %>%
+  gather(key = "variable", value = "value") %>%
+  ggplot(aes(x = value, fill = variable)) +
+  geom_density(alpha = 0.6) +
+  facet_wrap(~variable, scales = "free") +
+  labs(title = "Density Plot for LND_SQFOOT, TOT_LVG_AREA and SPEC_FEAT_VAL", x = "Value", y = "Density")+
+  theme(legend.position = "bottom")  # Moves the legend to the bottom
+
+```
+
+
+# Correlation HeatmapPlot
+
+## Compute the correlation matrix for the selected variables
+
+```{r warning=FALSE}
+cor_matrix <- cor(housing_data[, c("LND_SQFOOT", "TOT_LVG_AREA", "SPEC_FEAT_VAL", "RAIL_DIST", 
+                                   "OCEAN_DIST", "WATER_DIST", "CNTR_DIST", "SUBCNTR_DI", 
+                                   "HWY_DIST", "age", "SALE_PRC")], use = "complete.obs")
+cor_matrix
+# Plot the correlation heatmap
+corrplot(cor_matrix, method = "color", type = "full", 
+         tl.col = "black", tl.cex = 0.8, cl.lim = c(-1, 1), 
+         addCoef.col = "white", number.cex = 0.7, 
+         title = "Correlation Heatmap of Housing Data", 
+         mar = c(0, 0, 2, 0))
+
+
+# Visualizing correlation matrix
+ggcorrplot(cor_matrix, lab = TRUE, type = "lower", colors = c("red", "white", "blue"))
+```
+
+
+```{r warning=FALSE}
+# Create boxplot usingSale Price by Structure Quality
+ggplot(housing_data, aes(x = structure_quality, y = SALE_PRC)) +
+  geom_boxplot(fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(title = "Sale Price by Structure Quality", 
+       x = "Structure Quality", 
+       y = "Sale Price") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r warning=FALSE}
+# Bar chart for structure_quality with data labels
+ggplot(housing_data, aes(x = structure_quality)) + 
+  geom_bar(fill = "skyblue", color = "black") + 
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, color = "black") +  # Add data labels
+  labs(title = "Distribution of Structure Quality", x = "Structure Quality", y = "Count") +
+  theme_minimal()
+
+# Bar chart for month_sold with data labels
+ggplot(housing_data, aes(x = month_sold)) + 
+  geom_bar(fill = "lightgreen", color = "black") + 
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, color = "black") +  # Add data labels
+  labs(title = "Distribution of Month Sold", x = "Month Sold", y = "Count") +
+  theme_minimal()
+```
+
+```{r warning=FALSE}
+# Line chart for month_sold with data labels
+ggplot(housing_data, aes(x = month_sold)) + 
+  stat_count(geom = "line", aes(group = 1), color = "blue", size = 1) +  # Line chart
+  geom_point(aes(y = ..count..), stat = "count", color = "red", size = 3) +  # Data points
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, color = "black") +  # Data labels
+  labs(title = "Distribution of Month Sold", x = "Month Sold", y = "Count") +
+  scale_y_continuous(limits = c(650, NA)) +  # Set y-axis limit starting from 650
+  theme_minimal()
+
+```
+
+```{r warning=FALSE}
+# Bar chart for avno60plus with data labels
+ggplot(housing_data, aes(x = avno60plus)) + 
+  geom_bar(fill = "lightcoral", color = "black") + 
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, color = "black") +  # Add data labels
+  labs(title = "Distribution of Properties with People Over 60", x = "60+ Presence", y = "Count") +
+  theme_minimal()
+```
+
+```{r warning=FALSE}
+# Pie chart for avno60plus with data labels (percentage)
+ggplot(housing_data, aes(x = "", fill = avno60plus)) + 
+  geom_bar(width = 1, stat = "count", color = "black") + 
+  coord_polar(theta = "y") +
+  geom_text(stat = "count", aes(label = paste0(round((..count.. / sum(..count..)) * 100, 1), "%")), 
+            position = position_stack(vjust = 0.5), color = "white") +  # Add percentage labels
+  labs(title = "Pie Chart of Properties with People Over 60") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank())  # Remove axis text for cleaner look
+
+```
+
+
+# DISTANCE FEATURES
+
+### Boxplot for each distance variable to check for outliers
+```{r warning=FALSE}
+housing_data %>%
+  select(RAIL_DIST, OCEAN_DIST, WATER_DIST, CNTR_DIST, SUBCNTR_DI, HWY_DIST) %>%
+  gather(key = "variable", value = "value") %>%
+  ggplot(aes(x = variable, y = value)) +
+  geom_boxplot(fill = "lightblue", color = "black") +
+  labs(title = "Boxplot for Distance Variables", x = "Distance Variables", y = "Distance")
+```
+
+
+### Histogram for each distance variable
+```{r warning=FALSE}
+housing_data %>%
+  select(RAIL_DIST, OCEAN_DIST, WATER_DIST, CNTR_DIST, SUBCNTR_DI, HWY_DIST) %>%
+  gather(key = "variable", value = "value") %>%
+  ggplot(aes(x = value, fill = variable)) +
+  geom_histogram(bins = 30, alpha = 0.6, position = "identity") +
+  facet_wrap(~variable, scales = "free") +
+  labs(title = "Histogram for Distance Variables", x = "Distance", y = "Frequency")
+```
+
+### Density plot for each distance variable
+```{r warning=FALSE}
+housing_data %>%
+  select(RAIL_DIST, OCEAN_DIST, WATER_DIST, CNTR_DIST, SUBCNTR_DI, HWY_DIST) %>%
+  gather(key = "variable", value = "value") %>%
+  ggplot(aes(x = value, fill = variable)) +
+  geom_density(alpha = 0.6) +
+  facet_wrap(~variable, scales = "free") +
+  labs(title = "Density Plot for Distance Variables", x = "Distance", y = "Density")
+```
+
+
+# Verify Data Quality
+```{r warning=FALSE}
+anyDuplicated(housing_data)
+```
+
+```{r warning=FALSE}
+# Check for missing values in distance variables
+sum(is.na(housing_data[, c("RAIL_DIST", "OCEAN_DIST", "WATER_DIST", "CNTR_DIST", "SUBCNTR_DI", "HWY_DIST")]))
+```
+
+# Feature Engineering ====
+
+```{r warning=FALSE}
+housing_data <- housing_data %>%
+  mutate(
+    # Log transform for skewed numeric features
+    log_LND_SQFOOT = log1p(LND_SQFOOT),
+    log_TOT_LVG_AREA = log1p(TOT_LVG_AREA),
+    log_SPEC_FEAT_VAL = log1p(SPEC_FEAT_VAL),
+    
+    # Age group bins
+    age_group = cut(age, breaks = c(0, 30, 60, 100), labels = c("Young", "Middle", "Old")),
+    
+    # Interaction features
+    area_ratio = TOT_LVG_AREA / (LND_SQFOOT + 1),
+    
+    # Polynomial feature
+    age_sq = age^2
+  )
+
+# Convert new factor
+housing_data$age_group <- factor(housing_data$age_group)
+
+
+housing_data <- na.omit(housing_data)
+```
+
+
+# Split Features and Target ====
+```{r warning=FALSE}
+X_data <- housing_data[, -which(names(housing_data) == "SALE_PRC")]
+y_data <- housing_data$SALE_PRC
+
+# ==== Train-Test Split ====
+set.seed(123)
+train_index <- createDataPartition(y_data, p = 0.8, list = FALSE)
+X_train <- X_data[train_index, ]
+y_train <- y_data[train_index]
+
+X_test <- X_data[-train_index, ]
+y_test <- y_data[-train_index]
+
+# Bar plot for train and test sample size using ggplot in R
+
+# First, create a data frame for plotting
+train_size <- nrow(X_train)
+test_size <- nrow(X_test)
+
+sample_sizes <- data.frame(
+  Sample = c("Train", "Test"),
+  Size = c(train_size, test_size)
+)
+
+ggplot(sample_sizes, aes(x = Sample, y = Size, fill = Sample)) + 
+  geom_bar(stat = "identity", color = "black") + 
+  geom_text(aes(label = Size), vjust = -0.5, color = "black") + 
+  labs(title = "Train and Test Sample Sizes", x = "Sample Type", y = "Sample Size") +
+  theme_minimal() +
+  scale_fill_manual(values = c("lightblue", "lightgreen"))
+```
+
+# Preprocessing (Scaling) ====
+```{r warning=FALSE}
+pre_process <- preProcess(X_train, method = c("center", "scale"))
+X_train_scaled <- predict(pre_process, X_train)
+X_test_scaled <- predict(pre_process, X_test)
+
+```
+
+
+
+
+
+# XGBoost ====
+
+# Linear Regression ====
+```{r warning=FALSE}
+lm_model <- train(SALE_PRC ~ ., data = cbind(X_train_scaled, SALE_PRC = y_train), method = "lm")
+summary(lm_model)
+lm_pred <- predict(lm_model, newdata = X_test_scaled)
+
+lm_rmse <- RMSE(lm_pred, y_test)
+lm_r2 <- R2(lm_pred, y_test)
+lm_mae <- MAE(lm_pred, y_test)
+lm_mse <- mean((lm_pred - y_test)^2)
+```
+
+
+# Random Forest ====
+```{r warning=FALSE}
+rf_model <- randomForest(
+  x = X_train_scaled,
+  y = y_train,
+  ntree = 500,
+  mtry = 3,
+  importance = TRUE,
+  na.action = na.omit
+)
+rf_pred <- predict(rf_model, X_test_scaled)
+rf_rmse <- RMSE(rf_pred, y_test)
+rf_r2 <- R2(rf_pred, y_test)
+rf_mae <- MAE(rf_pred, y_test)
+rf_mse <- mean((rf_pred - y_test)^2)
+
+# Plot Random Forest Feature Importance
+importance_rf <- rf_model$importance
+importance_rf_df <- data.frame(Feature = rownames(importance_rf), Importance = importance_rf[, 1])
+
+# Plot the importance
+library(ggplot2)
+ggplot(importance_rf_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "lightblue", color = "black") +
+  coord_flip() + 
+  labs(title = "Feature Importance in Random Forest", x = "Features", y = "Importance") +
+  theme_minimal()
+```
+
+
+#  SVM ====
+```{r warning=FALSE}
+svm_model <- train(
+  SALE_PRC ~ ., 
+  data = cbind(X_train_scaled, SALE_PRC = y_train), 
+  method = "svmRadial",
+  trControl = trainControl(method = "cv", number = 5),
+  preProcess = c("center", "scale"),
+  tuneLength = 5
+)
+svm_pred <- predict(svm_model, newdata = X_test_scaled)
+svm_rmse <- RMSE(svm_pred, y_test)
+svm_r2 <- R2(svm_pred, y_test)
+svm_mae <- MAE(svm_pred, y_test)
+svm_mse <- mean((svm_pred - y_test)^2)
+
+```
+
+#  Decision Tree ====
+```{r warning=FALSE}
+# Train Decision Tree Model
+dt_model <- rpart(
+  SALE_PRC ~ ., 
+  data = cbind(X_train_scaled, SALE_PRC = y_train), 
+  method = "anova"
+)
+
+# Predictions for Decision Tree
+dt_pred <- predict(dt_model, X_test_scaled)
+dt_rmse <- RMSE(dt_pred, y_test)
+dt_r2 <- R2(dt_pred, y_test)
+dt_mae <- MAE(dt_pred, y_test)
+dt_mse <- mean((dt_pred - y_test)^2)
+
+library(rpart.plot)
+# Plot Decision Tree
+rpart.plot(dt_model, main = "Decision Tree for Predicting Sale Price")
+```
+
+
+### Combine Evaluation Metrics ====
+```{r warning=FALSE}
+
+xgb_rmse = 0
+xgb_r2 =0
+xgb_mae=9
+xgb_mse=8
+
+metrics_table <- data.frame(
+  Model = c("Random Forest", "XGBoost", "Linear Regression", "SVM", "Decision Tree"),
+  RMSE = c(rf_rmse, xgb_rmse, lm_rmse, svm_rmse, dt_rmse),
+  R_squared = c(rf_r2, xgb_r2, lm_r2, svm_r2, dt_r2),
+  MAE = c(rf_mae, xgb_mae, lm_mae, svm_mae, dt_mae),
+  MSE = c(rf_mse, xgb_mse, lm_mse, svm_mse, dt_mse)
+)
+
+print(metrics_table)
+```
+
+
+### Combine R² values for comparison
+```{r warning=FALSE}
+comparison_r2_data <- data.frame(
+  Model = c("Random Forest", "XGBoost", "Linear Regression", "SVM", "Decision Tree"),
+  R2 = c(rf_r2, xgb_r2, lm_r2, svm_r2, dt_r2)
+)
+
+# Plot comparison of R²
+ggplot(comparison_r2_data, aes(x = Model, y = R2, fill = Model)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = round(R2, 2)), vjust = -0.3, color = "black", size = 5) +  # Adding data labels
+  labs(title = "R² Comparison Across Models", x = "Model", y = "R²") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set3")
+
+```
+
+### Create a data frame for residuals comparison
+```{r warning=FALSE}
+residuals_data <- data.frame(
+  Actual = y_test,
+  RF_Pred = rf_pred,
+  XGB_Pred = xgb_pred,
+  LM_Pred = lm_pred,
+  SVM_Pred = svm_pred,
+  DT_Pred = dt_pred
+)
+
+# Plot Residuals for Random Forest
+ggplot(residuals_data, aes(x = Actual, y = RF_Pred - Actual)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(title = "Residuals Plot for Random Forest", x = "Actual Sale Price", y = "Residuals") +
+  theme_minimal()
+
+ggplot(residuals_data, aes(x = Actual, y = XGB_Pred - Actual)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(title = "Residuals Plot for XGB Model", x = "Actual Sale Price", y = "Residuals") +
+  theme_minimal()
+
+ggplot(residuals_data, aes(x = Actual, y = LM_Pred - Actual)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(title = "Residuals Plot for Linear Model", x = "Actual Sale Price", y = "Residuals") +
+  theme_minimal()
+
+ggplot(residuals_data, aes(x = Actual, y = SVM_Pred - Actual)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(title = "Residuals Plot for SVM Model", x = "Actual Sale Price", y = "Residuals") +
+  theme_minimal()
+
+# ==== Residuals Plot for Decision Tree ====
+ggplot(residuals_data, aes(x = Actual, y = dt_pred - Actual)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  labs(title = "Residuals Plot for Decision Tree Model", x = "Actual Sale Price", y = "Residuals") +
+  theme_minimal()
+
+```
+
+
+# Saving the Best Model and the Preprocessing steps
+```{r warning=FALSE}
+#saveRDS(xgb_model, file = "xgb_model.rds")
+#saveRDS(pre_process, file = "pre_process.rds")
+```
+
+
+
+#  PREDICTION
+
+## INPUT SETUP ====
+```{r warning=FALSE}
+input_data <- data.frame(
+  PARCELNO = "728980145245",
+  LND_SQFOOT = 11247,
+  TOT_LVG_AREA = 4552,
+  SPEC_FEAT_VAL = 2105,
+  RAIL_DIST = 4871.9,
+  OCEAN_DIST = 18507.2,
+  WATER_DIST = 375.8,
+  CNTR_DIST = 43897.9,
+  SUBCNTR_DI = 40115.7,
+  HWY_DIST = 41917.1,
+  age = 42,
+  avno60plus = 0,
+  month_sold = 8,
+  structure_quality = 5
+)
+```
+
+## FEATURE ENGINEERING AND PREPROCESSING OF THE NEW INPUT DATA
+```{r}
+input_data <- input_data %>%
+  mutate(
+    # Log transform for skewed numeric features
+    log_LND_SQFOOT = log1p(LND_SQFOOT),
+    log_TOT_LVG_AREA = log1p(TOT_LVG_AREA),
+    log_SPEC_FEAT_VAL = log1p(SPEC_FEAT_VAL),
+    
+    # Age group bins
+    age_group = cut(age, breaks = c(0, 30, 60, 100), labels = c("Young", "Middle", "Old")),
+    
+    # Interaction features
+    area_ratio = TOT_LVG_AREA / (LND_SQFOOT + 1),
+    
+    # Polynomial feature
+    age_sq = age^2
+  )
+
+# ==== FACTORS ====
+input_data$structure_quality <- factor(input_data$structure_quality, levels = c(1, 2, 3, 4, 5), ordered = TRUE)
+input_data$month_sold <- factor(input_data$month_sold, levels = 1:12, labels = month.abb)
+input_data$avno60plus <- factor(input_data$avno60plus, levels = c(0, 1), labels = c("No", "Yes"))
+
+# Drop PARCELNO (for prediction only)
+input_data_no_id <- input_data[, !(names(input_data) %in% c("PARCELNO"))]
+
+# ==== SCALE NUMERIC FEATURES ====
+# List of numeric columns to scale (exclude log-transformed and categorical columns)
+numeric_cols <- c("LND_SQFOOT", "TOT_LVG_AREA", "SPEC_FEAT_VAL", "RAIL_DIST", "OCEAN_DIST", "WATER_DIST", 
+                  "CNTR_DIST", "SUBCNTR_DI", "HWY_DIST", "age")
+
+# Apply scaling only to the existing numeric columns
+numeric_scaled <- predict(pre_process, input_data_no_id)
+numeric_scaled
+# Combine scaled numeric columns with categorical columns
+input_combined <- cbind(
+  as.data.frame(numeric_scaled),
+  avno60plus = input_data_no_id$avno60plus,
+  structure_quality = input_data_no_id$structure_quality,
+  month_sold = input_data_no_id$month_sold
+)
+
+# Add the log-transformed features and engineered features back into the dataset
+input_combined$log_LND_SQFOOT <- input_data_no_id$log_LND_SQFOOT
+input_combined$log_TOT_LVG_AREA <- input_data_no_id$log_TOT_LVG_AREA
+input_combined$log_SPEC_FEAT_VAL <- input_data_no_id$log_SPEC_FEAT_VAL
+input_combined$age_group <- input_data_no_id$age_group
+input_combined$area_ratio <- input_data_no_id$area_ratio
+input_combined$age_sq <- input_data_no_id$age_sq
+
+# Reorder columns to match the original input_data_no_id structure
+input_combined <- input_combined[, names(input_data_no_id)]
+
+
+# ==== XGBOOST PREDICTION ====
+# One-hot encode using model.matrix
+input_matrix <- model.matrix(~ . - 1, data = input_combined)
+
+## Loading the model
+#xgb_model <- readRDS("xgb_model.rds")  
+
+# Predict with XGBoost
+#predicted_price_xgb <- predict(xgb_model, newdata = input_matrix)
+
+
+# ==== FINAL TABLE (Extended input Table with the Prediction Value) ====
+prediction_table <- input_data
+#prediction_table$Predicted_XGB_Price_Scaled <- predicted_price_xgb
+
+# Remove PARCELNO from the prediction table
+prediction_table$PARCELNO <- NULL
+
+# ==== RESULT ====
+print(prediction_table)
+
+```
